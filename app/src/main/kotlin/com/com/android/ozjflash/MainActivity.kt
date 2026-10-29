@@ -1,287 +1,421 @@
 package com.com.android.ozjflash
 
+import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.com.android.ozjflash.term.Bootstrap
-import com.com.android.ozjflash.term.TerminalSession
-import com.com.android.ozjflash.ui.theme.ComposeEmptyActivityTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import android.util.Log
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.widget.Button
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.com.android.ozjflash.term.TermuxBootstrap
+import com.termux.terminal.TerminalSession
+import com.termux.terminal.TerminalSessionClient
+import com.termux.view.TerminalView
+import com.termux.view.TerminalViewClient
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 
-class MainActivity : ComponentActivity() {
+/**
+ * OZJFLASH 终端主界面。
+ *
+ * 终端本体完全使用 Termux 上游代码：
+ *  - com.termux.terminal.*（terminal-emulator 模块，含 libtermux.so 源码编译）
+ *  - com.termux.view.TerminalView（terminal-view 模块）
+ * 本文件只负责：解压 bootstrap、按需创建 bash 会话、软键盘 + 一排功能键。
+ */
+class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
+
+    private lateinit var terminalView: TerminalView
+    private lateinit var statusView: TextView
+    private lateinit var ctrlKey: Button
+    private lateinit var altKey: Button
+
+    private var session: TerminalSession? = null
+    private var ctrlDown = false
+    private var altDown = false
+    private var fontSizePx = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent {
-            ComposeEmptyActivityTheme {
-                TerminalApp()
-            }
-        }
-    }
-}
-
-private val BgColor = Color(0xFF101010)
-private val FgColor = Color(0xFFD8D8D8)
-private val HintColor = Color(0xFF8A8A8A)
-private val AccentColor = Color(0xFF64B5F6)
-
-@Composable
-fun TerminalApp() {
-    val ctx = LocalContext.current
-    var installed by remember { mutableStateOf(Bootstrap.isInstalled(ctx)) }
-    var installing by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0f) }
-    var status by remember { mutableStateOf(if (installed) "就绪" else "首次启动：解压 Termux 环境(约29MB)") }
-    var version by remember { mutableIntStateOf(0) }
-    var input by remember { mutableStateOf("") }
-    var rows by remember { mutableIntStateOf(40) }
-    var cols by remember { mutableIntStateOf(100) }
-
-    val session = remember { TerminalSession(ctx) }
-    val handler = remember { Handler(Looper.getMainLooper()) }
-    val lastTick = remember { longArrayOf(0L) }
-    val scroll = rememberScrollState()
-
-    fun startSession() {
-        session.onUpdate = {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastTick[0] > 80) {
-                lastTick[0] = now
-                handler.post { version++ }
-            }
-        }
-        session.onExit = { msg -> handler.post { status = msg; version++ } }
-        val ok = session.start(rows, cols)
-        status = if (ok) "已连接 bash · ${cols}x$rows" else "启动失败"
-        version++
-    }
-
-    fun doSend(text: String) {
-        if (text.isEmpty()) return
-        if (!session.running) {
-            status = "会话未运行"
+        try {
+            buildUi()
+        } catch (t: Throwable) {
+            showFatal("界面初始化失败", t)
             return
         }
-        session.write(text + "\n")
+        Thread({ startSession() }, "ozj-bootstrap").start()
     }
 
-    LaunchedEffect(Unit) {
-        if (!installed) {
-            installing = true
-            withContext(Dispatchers.IO) {
-                try {
-                    Bootstrap.install(ctx) { done, total ->
-                        progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
-                    }
-                } catch (t: Throwable) {
-                    handler.post { status = "解压失败: ${t.message}" }
-                }
-            }
-            installing = false
-            installed = Bootstrap.isInstalled(ctx)
-            status = if (installed) "环境就绪" else "环境解压失败"
+    override fun onDestroy() {
+        runCatching { session?.finishIfRunning() }
+        super.onDestroy()
+    }
+
+    // ---------------------------------------------------------------- UI
+
+    private fun buildUi() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0B0B0B.toInt())
         }
-        if (installed && !session.running) startSession()
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(5), dp(4), dp(3))
+        }
+        statusView = TextView(this).apply {
+            text = "准备运行环境…"
+            setTextColor(0xFF8BC34A.toInt())
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+        }
+        bar.addView(statusView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(smallButton("⌨") { showKeyboard() })
+        bar.addView(smallButton("↻") { restartSession() })
+        root.addView(bar)
+
+        fontSizePx = dp(13)
+        terminalView = TerminalView(this, null).apply {
+            setTerminalViewClient(this@MainActivity)
+            setTextSize(fontSizePx)
+            setBackgroundColor(0xFF000000.toInt())
+            isFocusable = true
+            isFocusableInTouchMode = true
+        }
+        root.addView(terminalView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(buildKeyRow())
+
+        setContentView(root)
     }
 
-    LaunchedEffect(version) {
-        withFrameNanos { }
-        scroll.scrollTo(scroll.maxValue)
+    private fun buildKeyRow(): View {
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(0xFF121212.toInt())
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(4), dp(4), dp(4), dp(6))
+        }
+        ctrlKey = keyButton("CTRL") { toggleCtrl() }
+        altKey = keyButton("ALT") { toggleAlt() }
+
+        row.addView(keyButton("ESC") { sendBytes(byteArrayOf(27)) })
+        row.addView(keyButton("TAB") { sendBytes(byteArrayOf(9)) })
+        row.addView(ctrlKey)
+        row.addView(altKey)
+        row.addView(keyButton("←") { sendText("\u001b[D") })
+        row.addView(keyButton("↑") { sendText("\u001b[A") })
+        row.addView(keyButton("↓") { sendText("\u001b[B") })
+        row.addView(keyButton("→") { sendText("\u001b[C") })
+        row.addView(keyButton("^C") { sendBytes(byteArrayOf(3)) })
+        row.addView(keyButton("^D") { sendBytes(byteArrayOf(4)) })
+        row.addView(keyButton("^L") { sendBytes(byteArrayOf(12)) })
+        row.addView(keyButton("^Z") { sendBytes(byteArrayOf(26)) })
+        row.addView(keyButton("PASTE") { pasteFromClipboard() })
+        row.addView(keyButton("⏎") { sendBytes(byteArrayOf(13)) })
+
+        scroll.addView(row)
+        return scroll
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(BgColor)
-            .imePadding()
-    ) {
-        // 顶部状态栏
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = status,
-                color = HintColor,
-                fontSize = 11.sp,
-                maxLines = 1,
-                modifier = Modifier.weight(1f)
+    private fun smallButton(label: String, onTap: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            textSize = 12f
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(10), dp(2), dp(10), dp(2))
+            setTextColor(0xFFBDBDBD.toInt())
+            background = GradientDrawable().apply {
+                cornerRadius = dp(6).toFloat()
+                setColor(0xFF1C1C1C.toInt())
+            }
+            setOnClickListener { onTap() }
+        }
+
+    private fun keyButton(label: String, onTap: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            textSize = 12f
+            isAllCaps = false
+            minWidth = dp(46)
+            minimumWidth = dp(46)
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setTextColor(0xFFE0E0E0.toInt())
+            background = GradientDrawable().apply {
+                cornerRadius = dp(6).toFloat()
+                setColor(0xFF242424.toInt())
+                setStroke(dp(1).coerceAtLeast(1), 0xFF3A3A3A.toInt())
+            }
+            setOnClickListener { onTap() }
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            if (installed) {
-                TextButton(onClick = {
-                    session.stop()
-                    status = "重启中…"
-                    handler.postDelayed({ startSession() }, 400)
-                }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text("重启", color = AccentColor, fontSize = 12.sp)
-                }
-            }
+            lp.rightMargin = dp(4)
+            layoutParams = lp
         }
-        if (installing) {
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
+
+    private fun toggleCtrl() {
+        ctrlDown = !ctrlDown
+        markToggle(ctrlKey, ctrlDown)
+    }
+
+    private fun toggleAlt() {
+        altDown = !altDown
+        markToggle(altKey, altDown)
+    }
+
+    private fun markToggle(button: Button, on: Boolean) {
+        (button.background as? GradientDrawable)?.setColor(
+            if (on) 0xFF2E7D32.toInt() else 0xFF242424.toInt()
+        )
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun showKeyboard() {
+        terminalView.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+        imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    // ------------------------------------------------------------ 会话启动
+
+    private fun startSession() {
+        try {
+            val filesDir = filesDir
+            val prefix = TermuxBootstrap.installIfNeeded(filesDir) { msg ->
+                runOnUiThread { statusView.text = msg }
+            }
+            val home = TermuxBootstrap.homeDir(filesDir).apply { mkdirs() }
+            val bash = File(prefix, "bin/bash")
+            if (!bash.isFile) throw RuntimeException("找不到 bash: ${bash.absolutePath}")
+
+            val newSession = TerminalSession(
+                bash.absolutePath,
+                home.absolutePath,
+                arrayOf("-bash"),
+                buildEnv(prefix, home),
+                8000,
+                this
             )
-        }
-
-        // 终端输出区
-        BoxWithConstraints(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-        ) {
-            val density = LocalDensity.current
-            val charW = with(density) { 12.sp.toPx() } * 0.62f
-            val lineH = with(density) { 15.sp.toPx() }
-            val c = (constraints.maxWidth / charW).toInt().coerceIn(20, 400)
-            val r = (constraints.maxHeight / lineH).toInt().coerceIn(5, 300)
-            LaunchedEffect(c, r) {
-                if (c != cols || r != rows) {
-                    cols = c
-                    rows = r
-                    session.resize(r, c)
-                }
-            }
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scroll)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = remember(version) { session.screen.snapshot() },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 15.sp,
-                    color = FgColor
-                )
-            }
-        }
-
-        // 功能键
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            KeyBtn("ESC") { session.write("\u001b") }
-            KeyBtn("TAB") { session.write("\t") }
-            KeyBtn("^C") { session.write("\u0003") }
-            KeyBtn("^D") { session.write("\u0004") }
-            KeyBtn("^Z") { session.write("\u001a") }
-            KeyBtn("^L") { session.write("\u000c") }
-            KeyBtn("↑") { session.write("\u001b[A") }
-            KeyBtn("↓") { session.write("\u001b[B") }
-            KeyBtn("→") { session.write("\u001b[C") }
-            KeyBtn("←") { session.write("\u001b[D") }
-            KeyBtn("清屏") { doSend("clear") }
-            KeyBtn("粘贴") {
-                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val t = cm.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString() ?: ""
-                input += t
-            }
-        }
-
-        // 输入行
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            BasicTextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier
-                    .weight(1f)
-                    .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 9.dp),
-                textStyle = TextStyle(
-                    color = Color(0xFFE8E8E8),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp
-                ),
-                cursorBrush = SolidColor(AccentColor),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = {
-                    doSend(input)
-                    input = ""
-                })
-            )
-            Button(onClick = {
-                doSend(input)
-                input = ""
-            }) {
-                Text("发送", fontSize = 13.sp)
-            }
+            runOnUiThread { attachSession(newSession) }
+        } catch (t: Throwable) {
+            runOnUiThread { showFatal("启动终端失败", t) }
         }
     }
-}
 
-@Composable
-private fun KeyBtn(label: String, onClick: () -> Unit) {
-    TextButton(
-        onClick = onClick,
-        modifier = Modifier.height(30.dp),
-        contentPadding = PaddingValues(horizontal = 8.dp)
-    ) {
-        Text(label, fontSize = 12.sp, color = Color(0xFFB0BEC5), fontFamily = FontFamily.Monospace)
+    private fun attachSession(newSession: TerminalSession) {
+        session = newSession
+        terminalView.attachSession(newSession)
+        terminalView.requestFocus()
+        statusView.text = "bash 已就绪 · 点屏幕呼出键盘"
+        showKeyboard()
+    }
+
+    private fun restartSession() {
+        statusView.text = "重启终端…"
+        val old = session
+        session = null
+        Thread({
+            runCatching { old?.finishIfRunning() }
+            startSession()
+        }, "ozj-restart").start()
+    }
+
+    private fun buildEnv(prefix: File, home: File): Array<String> {
+        val p = prefix.absolutePath
+        return arrayOf(
+            "HOME=$home",
+            "PREFIX=$p",
+            "TMPDIR=$p/tmp",
+            "PATH=$p/bin:/system/bin:/system/xbin",
+            "LD_LIBRARY_PATH=$p/lib",
+            "TERMINFO=$p/share/terminfo",
+            "SHELL=$p/bin/bash",
+            "TERM=xterm-256color",
+            "COLORTERM=truecolor",
+            "LANG=en_US.UTF-8",
+            "ANDROID_DATA=/data",
+            "ANDROID_ROOT=/system",
+            "EXTERNAL_STORAGE=/sdcard",
+            "TERMUX_VERSION=0.118.0",
+            "TERMUX_APP_PACKAGE=$packageName",
+            "TERMUX__PREFIX=$p"
+        )
+    }
+
+    // ------------------------------------------------------------ 输入辅助
+
+    private fun sendBytes(bytes: ByteArray) {
+        session?.write(bytes, 0, bytes.size)
+        terminalView.requestFocus()
+    }
+
+    private fun sendText(text: String) = sendBytes(text.toByteArray(Charsets.UTF_8))
+
+    private fun pasteFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val clip = cm.primaryClip ?: return
+        if (clip.itemCount == 0) return
+        val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: return
+        if (text.isNotEmpty()) sendText(text)
+    }
+
+    private fun copyToClipboard(text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("terminal", text))
+    }
+
+    // ------------------------------------------------------------ 错误界面
+
+    private fun showFatal(title: String, t: Throwable) {
+        Log.e(TAG, title, t)
+        val sw = StringWriter()
+        t.printStackTrace(PrintWriter(sw))
+        val text = buildString {
+            append(title).append("\n\n")
+            append(sw.toString())
+        }
+        val tv = TextView(this).apply {
+            setTextColor(0xFFFF8A80.toInt())
+            setBackgroundColor(0xFF101010.toInt())
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setTextIsSelectable(true)
+            this.text = text
+        }
+        setContentView(ScrollView(this).apply { addView(tv) })
+    }
+
+    // ------------------------------------------------- TerminalSessionClient
+
+    override fun onTextChanged(changedSession: TerminalSession) {
+        terminalView.onScreenUpdated()
+    }
+
+    override fun onTitleChanged(changedSession: TerminalSession) {
+        val title = changedSession.title
+        if (!title.isNullOrBlank()) statusView.text = title
+    }
+
+    override fun onSessionFinished(finishedSession: TerminalSession) {
+        statusView.text = "会话已结束（exit ${finishedSession.exitStatus}）· 点 ↻ 重开"
+    }
+
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+        copyToClipboard(text)
+    }
+
+    override fun onPasteTextFromClipboard(session: TerminalSession?) {
+        pasteFromClipboard()
+    }
+
+    override fun onBell(session: TerminalSession) = Unit
+
+    override fun onColorsChanged(session: TerminalSession) = Unit
+
+    override fun onTerminalCursorStateChange(state: Boolean) = Unit
+
+    override fun setTerminalShellPid(session: TerminalSession, pid: Int) {
+        Log.i(TAG, "shell pid = $pid")
+    }
+
+    override fun getTerminalCursorStyle(): Int? = null
+
+    override fun logError(tag: String, message: String) {
+        Log.e(tag, message)
+    }
+
+    override fun logWarn(tag: String, message: String) {
+        Log.w(tag, message)
+    }
+
+    override fun logInfo(tag: String, message: String) {
+        Log.i(tag, message)
+    }
+
+    override fun logDebug(tag: String, message: String) {
+        Log.d(tag, message)
+    }
+
+    override fun logVerbose(tag: String, message: String) {
+        Log.v(tag, message)
+    }
+
+    override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) {
+        Log.e(tag, message, e)
+    }
+
+    override fun logStackTrace(tag: String, e: Exception) {
+        Log.e(tag, "stack", e)
+    }
+
+    // ---------------------------------------------------- TerminalViewClient
+
+    override fun onScale(scale: Float): Float {
+        val next = (fontSizePx * scale).toInt().coerceIn(dp(8), dp(30))
+        if (next != fontSizePx) {
+            fontSizePx = next
+            terminalView.setTextSize(next)
+        }
+        return scale
+    }
+
+    override fun onSingleTapUp(e: MotionEvent) {
+        showKeyboard()
+    }
+
+    override fun shouldBackButtonBeMappedToEscape(): Boolean = false
+
+    override fun shouldEnforceCharBasedInput(): Boolean = true
+
+    override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
+
+    override fun isTerminalViewSelected(): Boolean = true
+
+    override fun copyModeChanged(copyMode: Boolean) = Unit
+
+    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession?): Boolean = false
+
+    override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
+
+    override fun onLongPress(event: MotionEvent): Boolean = false
+
+    override fun readControlKey(): Boolean = ctrlDown
+
+    override fun readAltKey(): Boolean = altDown
+
+    override fun readShiftKey(): Boolean = false
+
+    override fun readFnKey(): Boolean = false
+
+    override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean =
+        false
+
+    override fun onEmulatorSet() = Unit
+
+    companion object {
+        private const val TAG = "OZJFLASH"
     }
 }

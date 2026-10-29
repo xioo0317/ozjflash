@@ -5,6 +5,8 @@ on:
     branches: [ main ]
     paths:
       - "app/**"
+      - "terminal-emulator/**"
+      - "terminal-view/**"
       - "gradle/**"
       - "*.gradle"
       - "*.gradle.kts"
@@ -31,13 +33,16 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Ensure Android SDK platform
+      - name: Ensure Android SDK platform + NDK
         run: |
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKM" --licenses >/dev/null 2>&1 || true
           "$SDKM" "platforms;android-37" "build-tools;37.0.0" >/dev/null 2>&1 || true
+          # libtermux.so 由 terminal-emulator/src/main/jni/termux.c 现场编译, 需要 NDK
+          "$SDKM" "ndk;27.0.12077973" >/dev/null 2>&1
+          echo "NDK_HOME=$SDK/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Build debug APK
         run: |
@@ -59,4 +64,4 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest OZJFLASH-debug.apk \
             --title "OZJFLASH 终端 (debug APK)" \
-            --notes "内置 Termux bootstrap 的终端 App。安装后首次启动自动解压环境(约29MB)，然后即可使用 bash。仅 arm64-v8a。"
+            --notes "基于 Termux 上游 terminal-emulator/terminal-view 的终端 App，libtermux.so 由源码编译。安装后首次启动解压内置 bootstrap（约 29MB），之后即可使用 bash。仅 arm64-v8a。"

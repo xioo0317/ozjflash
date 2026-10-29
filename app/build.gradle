@@ -44,6 +44,8 @@ android {
 }
 
 dependencies {
+    // Termux 上游终端实现(terminal-emulator 内含 libtermux.so 的 C 源码)
+    implementation project(':terminal-view')
     implementation libs.androidx.core.ktx
     implementation libs.androidx.lifecycle.runtime.ktx
     implementation libs.androidx.activity.compose
