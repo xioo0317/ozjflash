@@ -225,11 +225,16 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
     }
 
     private fun attachSession(newSession: TerminalSession) {
-        session = newSession
-        terminalView.attachSession(newSession)
-        terminalView.requestFocus()
-        statusView.text = "bash 已就绪 · 点屏幕呼出键盘"
-        showKeyboard()
+        try {
+            session = newSession
+            terminalView.attachSession(newSession)
+            terminalView.requestFocus()
+            statusView.text = "bash 已就绪 · 点屏幕呼出键盘"
+            showKeyboard()
+        } catch (t: Throwable) {
+            // 典型情况：libtermux.so 加载失败(UnsatisfiedLinkError)、pty 创建失败
+            showFatal("挂载终端失败", t)
+        }
     }
 
     private fun restartSession() {
@@ -320,7 +325,12 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
     }
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
-        statusView.text = "会话已结束（exit ${finishedSession.exitStatus}）· 点 ↻ 重开"
+        val code = finishedSession.exitStatus
+        val hint = when (code) {
+            126, 127 -> "（系统禁止执行 bootstrap，请把这条发给开发者）"
+            else -> ""
+        }
+        statusView.text = "会话已结束（exit $code）$hint · 点 ↻ 重开"
     }
 
     override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
