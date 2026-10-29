@@ -11,6 +11,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
@@ -19,3 +20,4 @@ rootProject.name = "OZJFLASH"
 include(":app")
 include(":terminal-emulator")
 include(":terminal-view")
+include(":termux-shared")

@@ -6,6 +6,7 @@ on:
     paths:
       - "app/**"
       - "terminal-emulator/**"
+      - "termux-shared/**"
       - "terminal-view/**"
       - "gradle/**"
       - "*.gradle"
