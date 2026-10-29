@@ -53,7 +53,7 @@ object TermuxBootstrap {
 
         onProgress("修复路径与权限…")
         fixup(staging, prefix)
-        createSymlinks(symlinks)
+        createSymlinks(symlinks, prefix)
 
         onProgress("启用环境…")
         if (prefix.exists() && !prefix.deleteRecursively()) {
@@ -122,13 +122,17 @@ object TermuxBootstrap {
             entryName.startsWith("lib/apt/apt-helper") ||
             entryName.startsWith("lib/apt/methods")
 
-    private fun createSymlinks(symlinks: List<Pair<String, String>>) {
-        for ((target, linkPath) in symlinks) {
-            val link = File(linkPath)
-            if (link.exists() || link.parentFile?.exists() == true) {
-                // 目标已存在（zip 里同名条目）时先删掉再建，避免 EEXIST
-                runCatching { Os.unlink(linkPath) }
+    private fun createSymlinks(symlinks: List<Pair<String, String>>, prefix: File) {
+        for ((rawTarget, linkPath) in symlinks) {
+            // 少数符号链接的目标是绝对路径，同样要换成本 App 的 prefix
+            val target = if (rawTarget.startsWith(OLD_PREFIX)) {
+                prefix.absolutePath + rawTarget.removePrefix(OLD_PREFIX)
+            } else {
+                rawTarget
             }
+            val link = File(linkPath)
+            // 目标已存在（zip 里同名条目）时先删掉再建，避免 EEXIST
+            runCatching { Os.remove(linkPath) }
             link.parentFile?.mkdirs()
             try {
                 Os.symlink(target, linkPath)
